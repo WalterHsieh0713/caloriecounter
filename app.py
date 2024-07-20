@@ -1,5 +1,6 @@
 from openai import OpenAI
 import base64
+import json
 
 def image_to_base64_url(image_path):
     # Open the image file in binary mode
@@ -25,11 +26,13 @@ def main():
         model="gpt-4o",
         response_format={"type": "json_object"},
         messages=[
+            {
             "role": "system",
             "content": [
                 {
                 "type": "text",
-                "text": "You are a helpful nutritionist who gives me helpful advice and tells me calories, fat, and protein of each meal, giving me the information using JSON."
+                "text": """You are a helpful nutritionist who gives me helpful advice and tells me calories, fat, and protein of each meal, giving me the information using JSON.
+                Example response: {"egg fried rice": {"calories": 100, "fat": 100, "protein": 100, "carbs": 100}, "soup": {"calories": 100, "fat": 100, "protein": 100, "carbs": 100}}"""
                 }
             ]
             },
@@ -48,11 +51,15 @@ def main():
         ],
         temperature=1,
         max_tokens=256,
-        #top_p=1,
-        #frequency_penalty=0,
-        #presence_penalty=0
     )
-    print(response.choices[0].message.content)
+   # print(response.choices[0].message.content)
+    resp = json.loads(response.choices[0].message.content)
+    # print(resp)
+    for key, value in resp.items():
+        print(f"{key} has {value['calories']} calories, {value['protein']} grams of protein, {value['fat']} grams of fat, and {value['carbs']} grams of carbs.")
+
+
+
 
 
 if __name__ == "__main__":
