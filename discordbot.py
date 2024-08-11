@@ -3,7 +3,13 @@ from discord.ext import commands
 import base64
 import json
 import os
+import sqlite3
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+discord_bot_token = os.getenv("DISCORD_BOT_TOKEN")
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
 # Define the intents
 intents = discord.Intents.default()
@@ -14,7 +20,106 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Initialize OpenAI client
-client = OpenAI(api_key="sk-proj-5bCTXqjWpQ9TzAuIpuawT3BlbkFJVO4VuuTckV3imEf077jh")
+client = OpenAI(api_key = openai_api_key)
+
+# Initialize SQLite database
+def initialize_db():
+    conn = sqlite3.connect('user_data.db')
+    c = conn.cursor()
+
+    # Create tables if they don't exist
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_info (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL UNIQUE,
+            username TEXT NOT NULL,
+            dietary_preferences TEXT
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS meals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            calories INTEGER NOT NULL,
+            protein INTEGER NOT NULL,
+            fat INTEGER NOT NULL,
+            carbs INTEGER NOT NULL,
+            UNIQUE(name)
+        )
+    ''')
+    c.execute('''
+            CREATE TABLE IF NOT EXISTS user_meal_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                meal_id INTEGER NOT NULL,
+                meal_date DATE NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES user_info(user_id),
+                FOREIGN KEY (meal_id) REFERENCES meals(id)
+            )
+        ''')
+
+    conn.commit()
+    conn.close()
+
+# Save user information
+def save_user_info(user_id, username, dietary_preferences=None):
+    conn = sqlite3.connect('user_data.db')
+    c = conn.cursor()
+
+    # Check if the user already exists
+    c.execute('''
+        SELECT * FROM user_info WHERE user_id = ?
+    ''', (user_id,))
+    user = c.fetchone()
+
+    # If the user doesn't exist, insert their info
+    if not user:
+        c.execute('''
+            INSERT INTO user_info (user_id, username, dietary_preferences)
+            VALUES (?, ?, ?)
+        ''', (user_id, username, dietary_preferences))
+    # If user exists, update their username and dietary preferences
+    else:
+        c.execute('''
+            UPDATE user_info
+            SET username = ?, dietary_preferences = ?
+            WHERE user_id = ?
+        ''', (username, dietary_preferences, user_id))
+
+    conn.commit()
+    conn.close()
+
+# Save user data and meal information to the database
+def save_user_data(user_id, username, response_json):
+    # Save user info
+    save_user_info(user_id, username)
+
+    conn = sqlite3.connect('user_data.db')
+    c = conn.cursor()
+
+    # Save meal data and link to the user
+    for meal_name, meal_info in response_json.items():
+        c.execute('''
+            INSERT INTO meals (name, calories, protein, fat, carbs)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                calories=excluded.calories,
+                protein=excluded.protein,
+                fat=excluded.fat,
+                carbs=excluded.carbs
+        ''', (meal_name, meal_info['calories'], meal_info['protein'], meal_info['fat'], meal_info['carbs']))
+
+        meal_id = c.lastrowid if c.lastrowid != 0 else c.execute('SELECT id FROM meals WHERE name = ?', (meal_name,)).fetchone()[0]
+
+        c.execute('''
+            INSERT INTO user_meal_history (user_id, meal_id, meal_date)
+            VALUES (?, ?, DATE('now'))
+        ''', (user_id, meal_id))
+
+    conn.commit()
+    conn.close()
+    
 
 def image_to_base64_url(image_path):
     # Open the image file in binary mode
@@ -30,47 +135,77 @@ def image_to_base64_url(image_path):
     
     return base64_url
 
-def openai_vision(img_path: str) -> str:
-    client = OpenAI(
-        api_key = "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"
-    )
+def openai_vision(img_path: str) -> dict:
+    client = OpenAI(api_key=openai_api_key)
+    
     response = client.chat.completions.create(
         model="gpt-4o",
         response_format={"type": "json_object"},
         messages=[
             {
-            "role": "system",
-            "content": [
-                {
-                "type": "text",
-                "text": """You are a helpful nutritionist who gives me helpful advice and tells me calories, fat, and protein of each meal, giving me the information using JSON.
+                "role": "system",
+                "content": """You are a helpful nutritionist who gives me helpful advice and tells me calories, fat, and protein of each meal, giving me the information using JSON.
                 Example response: {"egg fried rice": {"calories": 100, "fat": 100, "protein": 100, "carbs": 100}, "soup": {"calories": 100, "fat": 100, "protein": 100, "carbs": 100}}"""
-                }
-            ]
             },
             {
-            "role": "user",
-            "content": [
-                {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_to_base64_url(img_path)
+                "role": "user",
+                "content": {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_to_base64_url(img_path)
+                    }
                 }
-                }
-            ]
-            },
-            
+            }
         ],
         temperature=1,
         max_tokens=256,
     )
-   # print(response.choices[0].message.content)
-    resp = json.loads(response.choices[0].message.content)
-    # print(resp)
-    result = ""
-    for key, value in resp.items():
-        result += f"{key} has:\n {value['calories']} calories\n {value['protein']} grams of protein\n {value['fat']} grams of fat\n {value['carbs']} grams of carbs."
-    return result
+
+    # Load the JSON response from OpenAI's API
+    response_json = json.loads(response.choices[0].message.content)
+
+    return response_json
+
+def generate_weekly_meal_plan(user_id):
+    conn = sqlite3.connect('user_data.db')
+    c = conn.cursor()
+    c.execute('''
+        SELECT m.name, m.calories, m.protein, m.fat, m.carbs
+        FROM meals m
+        JOIN user_meal_history h ON m.id = h.meal_id
+        WHERE h.user_id = ?
+        ORDER BY h.meal_date DESC
+        LIMIT 7
+    ''', (user_id,))
+    recent_meals = c.fetchall()
+    suggestions = []
+
+    if not recent_meals:
+        conn.close()
+        return None
+
+    for i in range(7):
+        suggestions.append(recent_meals[i % len(recent_meals)])
+    
+    conn.close()
+    return suggestions
+
+@bot.command(name='weekly_plan')
+async def weekly_plan(ctx):
+    user_id = str(ctx.author.id)
+    username = ctx.author.name
+    
+    suggestions = generate_weekly_meal_plan(user_id)
+    
+    if not suggestions:
+        await ctx.send(f"Sorry {username}, I don't have enough data to generate a meal plan for you yet.")
+        return
+    
+    response_text = f"Here is your meal plan for the next week, {username}:\n\n"
+    for i, (meal_name, calories, protein, fat, carbs) in enumerate(suggestions):
+        response_text += f"Day {i+1}: {meal_name} - {calories} calories, {protein}g protein, {fat}g fat, {carbs}g carbs\n"
+    
+    await ctx.send(response_text)
 
 @bot.event
 async def on_ready():
@@ -94,9 +229,18 @@ async def on_message(message):
                 await attachment.save(image_path)
                 print(f'Received and saved image: {attachment.filename}')
 
-                await message.channel.send(openai_vision(image_path))
+                user_id = str(message.author.id)
+                username = message.author.name
+
+                response_json = openai_vision(image_path)
+
+                save_user_data(user_id, username, image_path, response_json)
+
+                await message.channel.send(response_json)
 
     # Process commands if the message is a command
     await bot.process_commands(message)
 
-bot.run('MTI2NjU5MzM2NjA1Mzc1MjkxMw.G3o41L.WN7n4YxiFByd3Z1OT1RrrK-CzBcJRLS0Vlj0yY')
+initialize_db()
+
+bot.run(discord_bot_token)

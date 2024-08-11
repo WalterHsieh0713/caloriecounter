@@ -1,3 +1,5 @@
 
 *.jpg
 received_images/*
+.env
+user_data.db
