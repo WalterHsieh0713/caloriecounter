@@ -6,6 +6,8 @@ import os
 import sqlite3
 from openai import OpenAI
 from dotenv import load_dotenv
+from pydantic import BaseModel
+
 
 load_dotenv()
 discord_bot_token = os.getenv("DISCORD_BOT_TOKEN")
@@ -21,6 +23,13 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Initialize OpenAI client
 client = OpenAI(api_key = openai_api_key)
+
+class MealInfo(BaseModel):
+    meal_name: str
+    calories: int
+    protein: int
+    carbs: int
+    fat: int
 
 # Initialize SQLite database
 def initialize_db():
@@ -97,25 +106,24 @@ def save_user_data(user_id, username, response_json):
 
     conn = sqlite3.connect('user_data.db')
     c = conn.cursor()
-
+    print("response", response_json)
     # Save meal data and link to the user
-    for meal_name, meal_info in response_json.items():
-        c.execute('''
-            INSERT INTO meals (name, calories, protein, fat, carbs)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                calories=excluded.calories,
-                protein=excluded.protein,
-                fat=excluded.fat,
-                carbs=excluded.carbs
-        ''', (meal_name, meal_info['calories'], meal_info['protein'], meal_info['fat'], meal_info['carbs']))
+    c.execute('''
+        INSERT INTO meals (name, calories, protein, fat, carbs)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            calories=excluded.calories,
+            protein=excluded.protein,
+            fat=excluded.fat,
+            carbs=excluded.carbs
+    ''', (response_json['meal_name'], response_json['calories'], response_json['carbs'], response_json['protein'], response_json['fat']))
 
-        meal_id = c.lastrowid if c.lastrowid != 0 else c.execute('SELECT id FROM meals WHERE name = ?', (meal_name,)).fetchone()[0]
+    meal_id = c.lastrowid if c.lastrowid != 0 else c.execute('SELECT id FROM meals WHERE name = ?', (response_json['meal_name'],)).fetchone()[0]
 
-        c.execute('''
-            INSERT INTO user_meal_history (user_id, meal_id, meal_date)
-            VALUES (?, ?, DATE('now'))
-        ''', (user_id, meal_id))
+    c.execute('''
+        INSERT INTO user_meal_history (user_id, meal_id, meal_date)
+        VALUES (?, ?, DATE('now'))
+    ''', (user_id, meal_id))
 
     conn.commit()
     conn.close()
@@ -138,25 +146,27 @@ def image_to_base64_url(image_path):
 def openai_vision(img_path: str) -> dict:
     client = OpenAI(api_key=openai_api_key)
     
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        response_format={"type": "json_object"},
+    response = client.beta.chat.completions.parse(
+        model="gpt-4o-mini-2024-07-18",
         messages=[
             {
                 "role": "system",
-                "content": """You are a helpful nutritionist who gives me helpful advice and tells me calories, fat, and protein of each meal, giving me the information using JSON.
-                Example response: {"egg fried rice": {"calories": 100, "fat": 100, "protein": 100, "carbs": 100}, "soup": {"calories": 100, "fat": 100, "protein": 100, "carbs": 100}}"""
+                "content": """You are a helpful nutritionist who gives me helpful advice and tells me the calories, fat, and protein of each meal"""
             },
             {
                 "role": "user",
-                "content": {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": image_to_base64_url(img_path)
-                    }
-                }
+                "content": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_to_base64_url(img_path)
+                        },
+                    },
+                ],
             }
         ],
+        response_format=MealInfo,
         temperature=1,
         max_tokens=256,
     )
@@ -234,7 +244,7 @@ async def on_message(message):
 
                 response_json = openai_vision(image_path)
 
-                save_user_data(user_id, username, image_path, response_json)
+                save_user_data(user_id, username, response_json)
 
                 await message.channel.send(response_json)
 
