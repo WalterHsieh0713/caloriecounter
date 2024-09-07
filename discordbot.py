@@ -177,43 +177,61 @@ def openai_vision(img_path: str) -> dict:
     return response_json
 
 def generate_weekly_meal_plan(user_id):
+    # Connect to the database
     conn = sqlite3.connect('user_data.db')
     c = conn.cursor()
+
+    # Fetch the user's recent meals
     c.execute('''
         SELECT m.name, m.calories, m.protein, m.fat, m.carbs
         FROM meals m
         JOIN user_meal_history h ON m.id = h.meal_id
         WHERE h.user_id = ?
         ORDER BY h.meal_date DESC
-        LIMIT 7
+        LIMIT 10  -- Fetch last 10 meals to analyze
     ''', (user_id,))
     recent_meals = c.fetchall()
-    suggestions = []
 
-    if not recent_meals:
-        conn.close()
-        return None
-
-    for i in range(7):
-        suggestions.append(recent_meals[i % len(recent_meals)])
+    # Calculate average nutritional values from recent meals
+    if len(recent_meals) > 0:
+        avg_calories = sum([meal[1] for meal in recent_meals]) / len(recent_meals)
+        avg_protein = sum([meal[2] for meal in recent_meals]) / len(recent_meals)
+        avg_fat = sum([meal[3] for meal in recent_meals]) / len(recent_meals)
+        avg_carbs = sum([meal[4] for meal in recent_meals]) / len(recent_meals)
+    else:
+        avg_calories = avg_protein = avg_fat = avg_carbs = 0
     
+    # Prepare nutritional summary and analysis
+    nutritional_summary = f"Average calories: {avg_calories}\nAverage protein: {avg_protein}g\n"
+    nutritional_summary += f"Average fat: {avg_fat}g\nAverage carbs: {avg_carbs}g\n"
+    
+    # Now use GPT-4o-mini to act as a nutritionist and provide suggestions
+    client = OpenAI(api_key = openai_api_key)
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini-2024-07-18",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a helpful nutritionist who provides dietary advice and evaluates meal plans based on calories, protein, fat, and carbs."
+            },
+            {
+                "role": "user",
+                "content": f"Here is a summary of my recent meals: {nutritional_summary}. Can you provide a few bullet point suggestions for improving or maintaining my meal plan?"
+            }
+        ],
+        temperature=1,
+        response_format= {"type": "text"}
+    )
     conn.close()
-    return suggestions
+    return response.choices[0].message.content
 
 @bot.command(name='weekly_plan')
 async def weekly_plan(ctx):
     user_id = str(ctx.author.id)
     username = ctx.author.name
-    
-    suggestions = generate_weekly_meal_plan(user_id)
-    
-    if not suggestions:
-        await ctx.send(f"Sorry {username}, I don't have enough data to generate a meal plan for you yet.")
-        return
-    
-    response_text = f"Here is your meal plan for the next week, {username}:\n\n"
-    for i, (meal_name, calories, protein, fat, carbs) in enumerate(suggestions):
-        response_text += f"Day {i+1}: {meal_name} - {calories} calories, {protein}g protein, {fat}g fat, {carbs}g carbs\n"
+    response_text = generate_weekly_meal_plan(user_id)
+    print(response_text)
     
     await ctx.send(response_text)
 
